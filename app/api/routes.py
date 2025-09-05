@@ -30,6 +30,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+@router.get("/health")
+async def health_check():
+    """Health check endpoint for monitoring services"""
+    return {
+        "status": "healthy",
+        "service": "bulk-docx-converter"
+    }
+
+
 
 
 @router.post(

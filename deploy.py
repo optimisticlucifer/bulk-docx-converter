@@ -24,12 +24,37 @@ class RenderDeployer:
             "Content-Type": "application/json"
         }
         self.services = {}
+        self.owner_id = None
+        # Add timestamp to avoid naming conflicts
+        import time
+        self.timestamp = str(int(time.time()))
     
     def log(self, message: str, level: str = "INFO"):
         """Log messages with timestamp"""
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{timestamp}] {level}: {message}")
+    
+    def get_owner_id(self) -> str:
+        """Get the owner ID for the authenticated user"""
+        try:
+            self.log("Getting owner information...")
+            response = self.make_request("GET", "owners")
+            
+            if response and len(response) > 0:
+                owner = response[0]  # Get the first (usually only) owner
+                owner_id = owner.get("owner", {}).get("id")
+                if owner_id:
+                    self.owner_id = owner_id
+                    self.log(f"Found owner ID: {owner_id}")
+                    return owner_id
+                else:
+                    raise Exception("Could not find owner ID in response")
+            else:
+                raise Exception("No owners found for this account")
+        except Exception as e:
+            self.log(f"Failed to get owner ID: {e}", "ERROR")
+            raise
     
     def make_request(self, method: str, endpoint: str, data: Dict = None) -> Dict[str, Any]:
         """Make API request to Render"""
@@ -87,35 +112,100 @@ class RenderDeployer:
         self.log(f"Timeout waiting for {service_type} to be ready", "ERROR")
         return None
     
+    def wait_for_postgres_service(self, service_id: str, timeout: int = 600):
+        """Wait for a PostgreSQL service to be ready"""
+        self.log(f"Waiting for PostgreSQL service {service_id} to be ready...")
+        
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                service = self.make_request("GET", f"postgres/{service_id}")
+                status = service.get("status", "unknown")
+                
+                self.log(f"PostgreSQL status: {status}")
+                
+                if status == "available":
+                    self.log("PostgreSQL is ready!")
+                    # Update connection info
+                    self.services["database"]["connection_info"] = service
+                    self.log(f"PostgreSQL connection string: {service.get('connectionString', 'NOT_FOUND')}")
+                    return service
+                elif status in ["failed", "suspended"]:
+                    self.log(f"PostgreSQL deployment failed with status: {status}", "ERROR")
+                    return None
+                
+                time.sleep(30)  # Wait 30 seconds before checking again
+                
+            except Exception as e:
+                self.log(f"Error checking PostgreSQL status: {e}", "ERROR")
+                time.sleep(30)
+        
+        self.log(f"Timeout waiting for PostgreSQL to be ready", "ERROR")
+        return None
+    
+    def wait_for_redis_service(self, service_id: str, timeout: int = 600):
+        """Wait for a Redis service to be ready"""
+        self.log(f"Waiting for Redis service {service_id} to be ready...")
+        
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                service = self.make_request("GET", f"redis/{service_id}")
+                status = service.get("status", "unknown")
+                
+                self.log(f"Redis status: {status}")
+                
+                if status == "available":
+                    self.log("Redis is ready!")
+                    # Update connection string
+                    connection_string = service.get("connectionString")
+                    self.services["redis"]["connection_string"] = connection_string
+                    self.log(f"Redis connection string: {connection_string or 'NOT_FOUND'}")
+                    return service
+                elif status in ["failed", "suspended"]:
+                    self.log(f"Redis deployment failed with status: {status}", "ERROR")
+                    return None
+                
+                time.sleep(30)  # Wait 30 seconds before checking again
+                
+            except Exception as e:
+                self.log(f"Error checking Redis status: {e}", "ERROR")
+                time.sleep(30)
+        
+        self.log(f"Timeout waiting for Redis to be ready", "ERROR")
+        return None
+    
     def create_postgresql_database(self) -> str:
         """Create PostgreSQL database"""
         self.log("Creating PostgreSQL database...")
         
+        if not self.owner_id:
+            raise Exception("Owner ID not set. Call get_owner_id() first.")
+        
         postgres_config = {
-            "type": "pserv",
-            "name": "docx-converter-db",
+            "name": f"docx-converter-db-{self.timestamp}",
+            "ownerID": self.owner_id,
             "plan": "free",
             "databaseName": "docx_converter",
             "databaseUser": "converter_user",
-            "region": "oregon"
+            "region": "oregon",
+            "version": "15"
         }
         
         try:
-            result = self.make_request("POST", "services", postgres_config)
-            service_id = result["service"]["id"]
+            # Use the correct endpoint for PostgreSQL databases
+            result = self.make_request("POST", "postgres", postgres_config)
+            service_id = result["id"]
             self.services["database"] = {
                 "id": service_id,
-                "connection_info": None
+                "connection_info": result
             }
             
             self.log(f"PostgreSQL database created with ID: {service_id}")
             
-            # Wait for database to be ready and get connection string
-            service_info = self.wait_for_service(service_id, "PostgreSQL")
+            # Wait for database to be ready
+            service_info = self.wait_for_postgres_service(service_id)
             if service_info:
-                # Get connection string
-                connection_info = service_info["service"].get("databaseConnectionInfo", {})
-                self.services["database"]["connection_info"] = connection_info
                 return service_id
             else:
                 raise Exception("Failed to create PostgreSQL database")
@@ -128,29 +218,30 @@ class RenderDeployer:
         """Create Redis database"""
         self.log("Creating Redis database...")
         
+        if not self.owner_id:
+            raise Exception("Owner ID not set. Call get_owner_id() first.")
+        
         redis_config = {
-            "type": "redis",
-            "name": "docx-converter-redis",
+            "name": f"docx-converter-redis-{self.timestamp}",
+            "ownerID": self.owner_id,
             "plan": "free",
             "region": "oregon"
         }
         
         try:
-            result = self.make_request("POST", "services", redis_config)
-            service_id = result["service"]["id"]
+            # Use the correct endpoint for Redis databases  
+            result = self.make_request("POST", "redis", redis_config)
+            service_id = result["id"]
             self.services["redis"] = {
                 "id": service_id,
-                "connection_string": None
+                "connection_string": result.get("connectionString")
             }
             
             self.log(f"Redis database created with ID: {service_id}")
             
-            # Wait for Redis to be ready and get connection string
-            service_info = self.wait_for_service(service_id, "Redis")
+            # Wait for Redis to be ready
+            service_info = self.wait_for_redis_service(service_id)
             if service_info:
-                # Get connection string from service info
-                redis_connection = service_info["service"].get("redis", {}).get("connectionString")
-                self.services["redis"]["connection_string"] = redis_connection
                 return service_id
             else:
                 raise Exception("Failed to create Redis database")
@@ -167,21 +258,24 @@ class RenderDeployer:
         db_info = self.services.get("database", {}).get("connection_info", {})
         redis_connection = self.services.get("redis", {}).get("connection_string")
         
+        self.log(f"DEBUG: db_info keys: {list(db_info.keys()) if db_info else 'None'}")
+        self.log(f"DEBUG: redis_connection: {redis_connection or 'None'}")
+        
         if not db_info or not redis_connection:
-            raise Exception("Database services not ready")
+            raise Exception(f"Database services not ready. DB: {bool(db_info)}, Redis: {bool(redis_connection)}")
         
-        # Construct database URL
-        db_host = db_info.get("host")
-        db_port = db_info.get("port", 5432)
-        db_name = db_info.get("databaseName")
-        db_user = db_info.get("databaseUser")
-        db_password = db_info.get("databasePassword")
+        # Use the connection string directly from PostgreSQL service
+        database_url = db_info.get("connectionString")
+        if not database_url:
+            raise Exception("PostgreSQL connection string not available")
         
-        database_url = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+        if not self.owner_id:
+            raise Exception("Owner ID not set. Call get_owner_id() first.")
         
         web_config = {
             "type": "web_service",
-            "name": "docx-converter-api",
+            "name": f"docx-converter-api-{self.timestamp}",
+            "ownerID": self.owner_id,
             "repo": self.repo_url,
             "plan": "free",
             "region": "oregon",
@@ -221,18 +315,18 @@ class RenderDeployer:
         if not db_info or not redis_connection:
             raise Exception("Database services not ready")
         
-        # Construct database URL
-        db_host = db_info.get("host")
-        db_port = db_info.get("port", 5432)
-        db_name = db_info.get("databaseName")
-        db_user = db_info.get("databaseUser")
-        db_password = db_info.get("databasePassword")
+        # Use the connection string directly from PostgreSQL service
+        database_url = db_info.get("connectionString")
+        if not database_url:
+            raise Exception("PostgreSQL connection string not available")
         
-        database_url = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+        if not self.owner_id:
+            raise Exception("Owner ID not set. Call get_owner_id() first.")
         
         worker_config = {
             "type": "background_worker",
-            "name": "docx-converter-worker",
+            "name": f"docx-converter-worker-{self.timestamp}",
+            "ownerID": self.owner_id,
             "repo": self.repo_url,
             "plan": "free",
             "region": "oregon",
@@ -274,6 +368,10 @@ class RenderDeployer:
         """Deploy all services"""
         try:
             self.log("Starting deployment of bulk DOCX to PDF converter...")
+            
+            # Step 0: Get owner ID
+            self.log("Step 0: Getting account information...")
+            self.get_owner_id()
             
             # Step 1: Create PostgreSQL database
             self.log("Step 1: Creating PostgreSQL database...")
