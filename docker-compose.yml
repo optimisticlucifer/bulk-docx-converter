@@ -1,0 +1,87 @@
+services:
+  # PostgreSQL database
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: docx_converter
+      POSTGRES_USER: converter_user
+      POSTGRES_PASSWORD: converter_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U converter_user -d docx_converter"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for message queue
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI application
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://converter_user:converter_pass@db:5432/docx_converter
+      - REDIS_URL=redis://redis:6379/0
+      - STORAGE_PATH=/app/storage
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+    volumes:
+      - shared_storage:/app/storage
+      - ./app:/app/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["python", "-m", "app.main"]
+
+  # Celery worker for document conversion
+  worker:
+    build: .
+    environment:
+      - DATABASE_URL=postgresql://converter_user:converter_pass@db:5432/docx_converter
+      - REDIS_URL=redis://redis:6379/0
+      - STORAGE_PATH=/app/storage
+    volumes:
+      - shared_storage:/app/storage
+      - ./app:/app/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "app.workers.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
+
+  # Celery flower for monitoring (optional)
+  flower:
+    build: .
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "app.workers.celery_app", "flower", "--port=5555"]
+
+volumes:
+  postgres_data:
+  redis_data:
+  shared_storage:

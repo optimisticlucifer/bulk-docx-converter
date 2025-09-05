@@ -1,0 +1,81 @@
+services:
+  # PostgreSQL Database
+  - type: pserv
+    name: docx-converter-db
+    env: python
+    plan: free
+    databases:
+      - name: docx_converter
+        user: converter_user
+
+  # Redis Database  
+  - type: redis
+    name: docx-converter-redis
+    plan: free
+    ipAllowList: []
+
+  # FastAPI Web Service
+  - type: web
+    name: docx-converter-api
+    env: python
+    repo: https://github.com/yourusername/bulk-docx-converter
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python -m app.main"
+    plan: free
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: docx-converter-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: docx-converter-redis
+          property: connectionString
+      - key: API_HOST
+        value: "0.0.0.0"
+      - key: API_PORT
+        value: "10000"
+      - key: STORAGE_PATH
+        value: "/tmp/storage"
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: redis
+          name: docx-converter-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: redis
+          name: docx-converter-redis
+          property: connectionString
+
+  # Celery Worker Service
+  - type: worker
+    name: docx-converter-worker
+    env: python
+    repo: https://github.com/yourusername/bulk-docx-converter
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "celery -A app.workers.celery_app worker --loglevel=info --concurrency=2"
+    plan: free
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: docx-converter-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: docx-converter-redis
+          property: connectionString
+      - key: STORAGE_PATH
+        value: "/tmp/storage"
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: redis
+          name: docx-converter-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: redis
+          name: docx-converter-redis
+          property: connectionString
